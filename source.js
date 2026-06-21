@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Polytoria Better Character Customization
 // @namespace    polytoria-better-character-customization
-// @version      6.7
+// @version      6.7.1
 // @description  Removes pagination from every wardrobe tab (except Outfits) and loads all items.
 // @match        https://polytoria.com/my/avatar*
 // @grant        none
@@ -16,6 +16,7 @@
   let activeType = 'all';
   let activeAccessoryType = 'all';
   let activeSearchValue = '';
+  let outfitsActive = false;
 
   const EMPTY_WARDROBE = `
     <div class="text-muted" style="padding:37px 30px;">
@@ -52,13 +53,46 @@
     badge.textContent = msg;
   }
 
+  function setMainTabActive(clickedTab) {
+    document.querySelectorAll('.nav-link[data-wardrobe-tab]').forEach(t => {
+      t.classList.remove('active');
+    });
+    clickedTab.classList.add('active');
+
+    const accTabs = document.getElementById('wardrobe-accessory-tabs');
+    if (accTabs) {
+      const isHat = clickedTab.dataset.wardrobeTab === 'hat';
+      accTabs.classList.toggle('d-none', !isHat);
+    }
+  }
+
+  function clearAllMainTabHighlights() {
+    document.querySelectorAll('.nav-link[data-wardrobe-tab]').forEach(t => {
+      t.classList.remove('active');
+    });
+
+    const accTabs = document.getElementById('wardrobe-accessory-tabs');
+    if (accTabs) accTabs.classList.add('d-none');
+  }
+
+  function setAccessoryTabActive(clickedTab) {
+    document.querySelectorAll('.nav-link[data-wardrobe-accessory-tab]').forEach(t => {
+      t.classList.remove('active');
+    });
+    clickedTab.classList.add('active');
+  }
+
   async function fetchAllItems(type, accessoryType, signal) {
-    const cacheKey = `${type}_${accessoryType}`;
-    if (wardrobeCache[cacheKey]) {
-      return wardrobeCache[cacheKey];
+    if (type === 'hat' && accessoryType !== 'all') {
+      const allHats = await getHatAll(signal);
+      return allHats.filter(item => (item.accessoryType ?? 'hat') === accessoryType);
     }
 
-    const base = `/api/avatar/wardrobe?type=${type}&accessoryType=${accessoryType}&search=&page=`;
+    if (type === 'hat') return getHatAll(signal);
+
+    if (wardrobeCache[type]) return wardrobeCache[type];
+
+    const base = `/api/avatar/wardrobe?type=${type}&accessoryType=all&search=&page=`;
     const first = await fetch(base + '1', { signal }).then(r => r.json());
     const { lastPage } = first.meta;
     const items = [...first.data];
@@ -72,7 +106,28 @@
       pages.forEach(p => items.push(...p.data));
     }
 
-    wardrobeCache[cacheKey] = items;
+    wardrobeCache[type] = items;
+    return items;
+  }
+
+  async function getHatAll(signal) {
+    if (wardrobeCache['hat']) return wardrobeCache['hat'];
+
+    const base = '/api/avatar/wardrobe?type=hat&accessoryType=all&search=&page=';
+    const first = await fetch(base + '1', { signal }).then(r => r.json());
+    const { lastPage } = first.meta;
+    const items = [...first.data];
+
+    if (lastPage > 1) {
+      const pages = await Promise.all(
+        Array.from({ length: lastPage - 1 }, (_, i) =>
+          fetch(base + (i + 2), { signal }).then(r => r.json())
+        )
+      );
+      pages.forEach(p => items.push(...p.data));
+    }
+
+    wardrobeCache['hat'] = items;
     return items;
   }
 
@@ -94,22 +149,9 @@
       const escapedSearch = escapeHTML(searchTerm);
       const regexStr = escapedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(`((?:${regexStr})+)`, 'gi');
-
-      const customHighlightStyle = `
-        background-color: #3bafff;
-        color: #ffffff;
-        padding: 0.75px 3.75px;
-        border-radius: 5px;
-        font-weight: 600;
-        text-shadow: none;
-        display: inline-block;
-        line-height: 1;
-      `;
-
-      highlightedName = highlightedName.replace(
-        regex,
-        `<mark style="${customHighlightStyle}">$1</mark>`
-      );
+      const hl = `background-color:#3bafff;color:#ffffff;padding:0.75px 3.75px;border-radius:5px;` +
+                 `font-weight:600;text-shadow:none;display:inline-block;line-height:1;`;
+      highlightedName = highlightedName.replace(regex, `<mark style="${hl}">$1</mark>`);
     }
 
     const wrapper = document.createElement('div');
@@ -122,7 +164,7 @@
           </div>
         </div>
         <a href="/store/${item.id}" class="text-reset">
-          <h6 class="text-truncate mb-0" style="padding-top: 2px; padding-bottom: 2px;">${highlightedName}</h6>
+          <h6 class="text-truncate mb-0" style="padding-top:2px;padding-bottom:2px;">${highlightedName}</h6>
         </a>
         <small class="text-muted d-block">${creatorText}</small>
       </div>`;
@@ -141,7 +183,6 @@
     if (searchBox) activeSearchValue = searchBox.value;
 
     const query = activeSearchValue.trim().toLowerCase();
-
     const filteredItems = query
       ? allItems.filter(item => item.name.toLowerCase().includes(query))
       : allItems;
@@ -161,30 +202,27 @@
     filteredItems.forEach(item => frag.appendChild(buildWardrobeCard(item, activeSearchValue.trim())));
     grid.appendChild(frag);
 
-    if (query) {
-      showStatus(`Found ${filteredItems.length} of ${allItems.length} items`);
-    } else {
-      showStatus(`${allItems.length} items`);
-    }
+    showStatus(query
+      ? `Found ${filteredItems.length} of ${allItems.length} items`
+      : `${allItems.length} items`
+    );
   }
 
   async function populateWardrobe(type, accessoryType) {
     const grid = document.getElementById('wardrobe-assets');
     if (!grid) return;
 
-    const cacheKey = `${type}_${accessoryType}`;
+    const isSubCategory = type === 'hat' && accessoryType !== 'all';
+    const cacheKey = type;
 
-    if (wardrobeCache[cacheKey]) {
+    if (!isSubCategory && wardrobeCache[cacheKey]) {
       renderItems(wardrobeCache[cacheKey], grid);
       return;
     }
 
-    if (currentAbortController) {
-      currentAbortController.abort();
-    }
-
+    if (currentAbortController) currentAbortController.abort();
     currentAbortController = new AbortController();
-    const signal = currentAbortController.signal;
+    const { signal } = currentAbortController;
 
     grid.innerHTML = '<div class="text-muted p-4"><i class="fas fa-spinner fa-spin me-2"></i>Loading all items…</div>';
     hidePagination();
@@ -192,30 +230,30 @@
     try {
       const items = await fetchAllItems(type, accessoryType, signal);
       if (signal.aborted) return;
-
       renderItems(items, grid);
     } catch (error) {
       if (error.name === 'AbortError') return;
-
       console.error('Error fetching wardrobe items:', error);
       if (!signal.aborted) {
         grid.classList.remove('itemgrid');
         grid.classList.add('row');
-        grid.innerHTML = `<div class="text-danger m-4" style="width: 100%;">
+        grid.innerHTML = `<div class="text-danger m-4" style="width:100%;">
           <h6 class="mb-1"><i class="fas fa-exclamation-triangle me-2"></i>Failed to load items</h6>
-          <p class="mb-0 small text-danger" style="opacity: 0.8;">You might be hitting rate limits. Please wait a moment or refresh the page.</p>
+          <p class="mb-0 small text-danger" style="opacity:0.8;">You might be hitting rate limits. Please wait a moment or refresh the page.</p>
         </div>`;
       }
     }
   }
 
-
   document.addEventListener('click', (e) => {
     const tab = e.target.closest('.nav-link[data-wardrobe-tab]');
     if (tab) {
       const targetType = tab.dataset.wardrobeTab;
+
       if (targetType === 'outfits') {
+        clearAllMainTabHighlights();
         showStatus('');
+        outfitsActive = true;
         activeType = 'outfits';
         return;
       }
@@ -224,8 +262,15 @@
       e.stopPropagation();
       e.stopImmediatePropagation();
 
+      outfitsActive = false;
+      setMainTabActive(tab);
+
       activeType = targetType;
       activeAccessoryType = 'all';
+
+      const allAccTab = document.querySelector('.nav-link[data-wardrobe-accessory-tab="all"]');
+      if (allAccTab) setAccessoryTabActive(allAccTab);
+
       populateWardrobe(activeType, activeAccessoryType);
       return;
     }
@@ -238,9 +283,11 @@
       e.stopPropagation();
       e.stopImmediatePropagation();
 
+      setAccessoryTabActive(accTab);
       activeAccessoryType = accTab.dataset.wardrobeAccessoryTab;
       populateWardrobe(activeType, activeAccessoryType);
     }
+
   }, true);
 
   let debounceTimer;
@@ -248,7 +295,6 @@
     if (activeType === 'outfits') return;
     if (e.target && e.target.id === 'search') {
       e.stopImmediatePropagation();
-
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         activeSearchValue = e.target.value;
@@ -272,16 +318,13 @@
 
   function waitForWardrobe() {
     const grid = document.getElementById('wardrobe-assets');
-    if (!grid) {
-      setTimeout(waitForWardrobe, 100);
-      return;
-    }
+    if (!grid) { setTimeout(waitForWardrobe, 100); return; }
 
     const observer = new MutationObserver((_, obs) => {
       if (grid.children.length > 0) {
         obs.disconnect();
 
-        grid.style.maxHeight = 204.2 * 3 + 'px';
+        grid.style.maxHeight = 204.2 * 2.5 + 'px';
         grid.style.overflowY = 'auto';
         grid.style.overflowX = 'hidden';
         grid.style.paddingRight = '10px';
